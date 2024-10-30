@@ -5,9 +5,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_task_wdt.h>
-// #include <BleMouse.h>
+#include <BleMouse.h>
+#include <freertos/queue.h>
 
-// BleMouse bleMouse;
+BleMouse bleMouse;
 
 #ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -28,7 +29,7 @@ const int DATA_PIN = 5;   // ESP32的GPIO5
 // 防抖和优化相关常量
 const float noise_threshold_tracking_mm = 0.08;
 const float noise_threshold_scrolling_mm = 0.09;
-const int frames_delay = 6;
+const int frames_delay = 20;
 const int frames_stablization = 15;
 const float scale_tracking_mm = 12.0;
 const float scale_scroll_mm = 1.6;
@@ -36,6 +37,7 @@ const float slow_scroll_threshold_mm = 2.0;
 const float max_delta_mm = 3;
 const int proximity_threshold_mm = 15;
 const float slow_scroll_amount = 0.20F;
+const TickType_t xDelay = pdMS_TO_TICKS(10);
 
 // 新增常量
 const int SCROLL_THRESHOLD = 50;       // 滚动阈值，根据实际情况调整
@@ -55,6 +57,9 @@ unsigned long finger_down_time = 0;
 bool is_tapping = false;
 const unsigned long TAP_TIMEOUT = 400; // 点击超时时间（毫秒）
 float scroll_accumulator = 0;
+
+// 定义消息队列句柄
+static QueueHandle_t mouseEventQueue = NULL;
 
 struct TouchInfo
 {
@@ -107,8 +112,16 @@ void IRAM_ATTR byte_received(uint8_t data)
   index += 8;
   if (index == 48)
   {
-    g_received_packet = buffer;
-    g_packet_ready = true;
+    if (mouseEventQueue != NULL)
+    { // 确保队列存在
+      BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+      uint64_t temp = buffer; // 创建临时变量，因为buffer会被清零
+      xQueueSendFromISR(mouseEventQueue, &temp, &xHigherPriorityTaskWoken);
+      if (xHigherPriorityTaskWoken)
+      {
+        portYIELD_FROM_ISR();
+      }
+    }
     index = 0;
     buffer = 0;
   }
@@ -492,26 +505,25 @@ void parse_extended_packet(uint64_t packet)
 
 void touchpadTask(void *pvParameters)
 {
-  const TickType_t xDelay = pdMS_TO_TICKS(10);
+  uint64_t packet;
 
+  if (mouseEventQueue == NULL)
+  {
+    Serial.println("Queue not initialized!");
+    vTaskDelete(NULL);
+    return;
+  }
   while (1)
   {
-    global_tick++;
-    esp_task_wdt_reset(); // 喂狗
-
-    if (g_packet_ready)
+    if (xQueueReceive(mouseEventQueue, &packet, pdMS_TO_TICKS(10)))
     {
-      uint64_t packet = g_received_packet;
-      g_packet_ready = false;
-      uint8_t w =
-          (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
-
-      // process_packet(packet);
+      // 处理packet数据
+      uint8_t w = (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
       switch (w)
       {
-      case 3: // pass through
+      case 3:
         break;
-      case 2: // extended w mode
+      case 2:
         parse_extended_packet(packet);
         break;
       default:
@@ -519,7 +531,8 @@ void touchpadTask(void *pvParameters)
         break;
       }
     }
-
+    // 其他任务逻辑...
+    global_tick++;
     if (global_tick - session_started_tick >= frames_delay)
     {
       if (!reports.empty())
@@ -527,36 +540,76 @@ void touchpadTask(void *pvParameters)
         report item = reports.pop_front();
         // hid::report(item.buttons, item.x, item.y, item.scroll);
         Serial.printf("Buttons: %d, X: %d, Y: %d, Scroll: %d\n", item.buttons, item.x, item.y, item.scroll);
-        // if (bleMouse.isConnected())
+
+        // 如果和上次的一样，就不传了
+        // if (item.buttons == previousItem.buttons && item.x == previousItem.x && item.y == previousItem.y && item.scroll == previousItem.scroll)
         // {
-        //   if (item.buttons > 0)
-        //   {
-        //     if (item.buttons == 1)
-        //     {
-        //       bleMouse.click(MOUSE_LEFT);
-        //     }
-        //     else if (item.buttons == 2)
-        //     {
-        //       bleMouse.click(MOUSE_RIGHT);
-        //     }
-        //   }
-        //   else
-        //   {
-        //     if (item.scroll != 0)
-        //     {
-        //       bleMouse.move(0, 0, item.scroll);
-        //     }
-        //     else if (item.x != 0 || item.y != 0)
-        //     {
-        //       bleMouse.move(item.x, item.y);
-        //     }
-        //   }
+        //   continue;
         // }
+
+        if (bleMouse.isConnected())
+        {
+          if (item.buttons > 0)
+          {
+            if (item.buttons == 1)
+            {
+              // bleMouse.click(MOUSE_LEFT);
+            }
+            else if (item.buttons == 2)
+            {
+              bleMouse.click(MOUSE_RIGHT);
+            }
+          }
+          else
+          {
+            if (item.scroll != 0)
+            {
+              bleMouse.move(0, 0, item.scroll);
+            }
+            else if (item.x != 0 || item.y != 0)
+            {
+              bleMouse.move(item.x, item.y);
+            }
+          }
+        }
+        // previousItem = item;
       }
     }
 
     vTaskDelay(xDelay);
   }
+
+  // const TickType_t xDelay = pdMS_TO_TICKS(10);
+
+  // while (1)
+  // {
+  //   global_tick++;
+  //   esp_task_wdt_reset(); // 喂狗
+
+  //   report previousItem = {0, 0, 0, 0};
+
+  //   if (g_packet_ready)
+  //   {
+  //     uint64_t packet = g_received_packet;
+  //     g_packet_ready = false;
+  //     uint8_t w =
+  //         (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
+
+  //     // process_packet(packet);
+  //     switch (w)
+  //     {
+  //     case 3: // pass through
+  //       break;
+  //     case 2: // extended w mode
+  //       parse_extended_packet(packet);
+  //       break;
+  //     default:
+  //       parse_primary_packet(packet, w);
+  //       break;
+  //     }
+  //   }
+
+  // }
 }
 
 void setup()
@@ -564,6 +617,16 @@ void setup()
   Serial.begin(115200);
   delay(1000);
   Serial.println("ESP32 Touchpad Test");
+  bleMouse.begin();
+
+  // 创建队列 - 在使用之前必须先创建
+  mouseEventQueue = xQueueCreate(32, sizeof(uint64_t)); // 32是队列长度
+  if (mouseEventQueue == NULL)
+  {
+    Serial.println("Queue creation failed!");
+    while (1)
+      ; // 如果队列创建失败，停止运行
+  }
 
   // 初始化PS2通信
   ps2::begin(CLOCK_PIN, DATA_PIN, byte_received);
@@ -587,22 +650,21 @@ void setup()
   proximity_threshold_y = proximity_threshold_mm * synaptics::units_per_mm_y;
 
   // 初始化任务看门狗
-  esp_task_wdt_init(10, true); // 10秒超时
+  esp_task_wdt_init(100, true); // 100ms超时，任务看门狗启用
 
   // 创建触摸板处理任务
   xTaskCreatePinnedToCore(
-      touchpadTask,   // 任务函数
-      "TouchpadTask", // 任务名称
-      4096,           // 堆栈大小
-      NULL,           // 参数
-      1,              // 优先级
-      NULL,           // 任务句柄
-      1               // 在核心1上运行
+      touchpadTask,             // 任务函数
+      "TouchpadTask",           // 任务名称
+      4096,                     // 堆栈大小
+      NULL,                     // 参数
+      configMAX_PRIORITIES - 1, // 优先级
+      NULL,                     // 任务句柄
+      0                         // 在核心0上运行
   );
 
   // 将当前运行的核心（通常是核心0）添加到看门狗
   esp_task_wdt_add(NULL);
-  // bleMouse.begin();
 }
 
 void loop()

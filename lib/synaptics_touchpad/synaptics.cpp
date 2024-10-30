@@ -72,8 +72,8 @@ namespace synaptics
     synaptics::status_request(0x0C, result);
     bool coveredPadGest = result[0] & 0x80;
     clickpad_type = (result[0] >> 4) & 0x01 | (result[1] << 1) & 0x02;
-    char *clickPadInfo[4] = {"Not a ClickPad", "1-button ClickPad",
-                             "2-button ClickPad", "Reserved"};
+    const char *clickPadInfo[4] = {"Not a ClickPad", "1-button ClickPad",
+                                   "2-button ClickPad", "Reserved"};
     bool advGest = result[0] & 0x08;
     bool clearPad = result[0] & 0x04;
     sprintf(buffer,
