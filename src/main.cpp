@@ -39,11 +39,6 @@ const int proximity_threshold_mm = 15;
 const float slow_scroll_amount = 0.20F;
 const TickType_t xDelay = pdMS_TO_TICKS(10);
 
-// 新增常量
-const int SCROLL_THRESHOLD = 50;       // 滚动阈值，根据实际情况调整
-const int MIDDLE_CLICK_DURATION = 100; // 中键点击持续时间（毫秒）
-const float SCROLL_SENSITIVITY = 0.5;  // 调整这个值来改变滚动灵敏度
-
 // 全局变量
 volatile uint64_t g_received_packet = 0;
 volatile bool g_packet_ready = false;
@@ -54,9 +49,18 @@ int last_y = 0;
 unsigned long three_finger_start = 0;
 bool middle_button_pressed = false;
 unsigned long finger_down_time = 0;
-bool is_tapping = false;
-const unsigned long TAP_TIMEOUT = 400; // 点击超时时间（毫秒）
-float scroll_accumulator = 0;
+
+// Tap as click 轻触作为点击
+bool tap_detected = false;
+unsigned long tap_start_tick = 0;
+const unsigned long tap_time_threshold = 25; // 轻触时间tick
+float total_movement = 0;
+const float tap_tracking_threshold = 15;   // 防止手抖
+const short tap_z_threshold = 100;         // 防止手掌误触，z是触摸宽度，当手掌压上去时，z值会很大
+short max_tap_z = 0;                       // 记录最大的z值
+uint16_t button_state_count = 0;           // 记录超过一定次数的按钮状态
+const uint16_t button_state_threshold = 5; // 按钮状态超过一定次数，才认为是点击
+short tap_button = 0;                      // 记录轻触时的按钮状态
 
 // 定义消息队列句柄
 static QueueHandle_t mouseEventQueue = NULL;
@@ -86,14 +90,9 @@ struct report
 };
 
 RingBuffer<report, 32> reports;
-static finger_state finger_states[2];
+static finger_state finger_states[2]; // 0 is primary, 1 is secondary
 static short finger_count = 0;
 static uint8_t button_state = 0;
-
-const uint8_t LEFT_BUTTON = 0x01;
-const uint8_t RIGHT_BUTTON = 0x02;
-const uint8_t MIDDLE_BUTTON = 0x04;
-
 // 变量
 float scale_tracking_x, scale_tracking_y;
 float scale_scroll;
@@ -107,6 +106,28 @@ void IRAM_ATTR byte_received(uint8_t data)
 {
   static uint64_t buffer = 0;
   static int index = 0;
+
+  // Ignore all bytes until we see the start of a packet, otherwise the
+  // packets may get out of sequence and things will get very confusing.
+  if (index == 0 && (data & 0xc8) != 0x80)
+  {
+    Serial.print("Unexpected byte0 data ");
+    Serial.println(data, HEX);
+
+    index = 0;
+    buffer = 0;
+    return;
+  }
+
+  if (index == 24 && (data & 0xc8) != 0xc0)
+  {
+    Serial.print("Unexpected byte3 data ");
+    Serial.println(data, HEX);
+
+    index = 0;
+    buffer = 0;
+    return;
+  }
 
   buffer |= ((uint64_t)data) << index;
   index += 8;
@@ -127,6 +148,7 @@ void IRAM_ATTR byte_received(uint8_t data)
   }
 }
 
+// 将值转换为HID值
 float to_hid_value(float value, float threshold, float scale_factor)
 {
   const float hid_max = 127.0F;
@@ -135,6 +157,15 @@ float to_hid_value(float value, float threshold, float scale_factor)
     return 0;
   }
   return sign(value) * min(max(abs(value) * scale_factor, 1.0F), hid_max);
+}
+
+void tap_as_click_reset(int flag)
+{
+  tap_detected = false;
+  total_movement = 0;
+  max_tap_z = 0;
+  button_state_count = 0;
+  Serial.printf("Tap as click reset, flag: %d\n", flag);
 }
 
 void queue_report(uint8_t buttons, int8_t x, int8_t y, float scroll)
@@ -183,7 +214,7 @@ void parse_primary_packet(uint64_t packet, int w)
           (packet >> 16) & 0x1000;
   int y = (packet >> 40) & 0x00FF | (packet >> 4) & 0x0F00 |
           (packet >> 17) & 0x1000;
-  short z = (packet >> 16) & 0xFF;
+  short z = (packet >> 16) & 0xFF; // z 是宽度，手掌压上去z就大，手指轻轻触摸z就小
   // w is width only if it >= 4. otherwise it encodes finger count
   short width = max(w, 4);
 
@@ -306,6 +337,7 @@ void parse_primary_packet(uint64_t packet, int w)
         {
           finger_states[0].x.reset();
           finger_states[0].y.reset();
+          // tap_as_click_reset();
         }
       }
     }
@@ -317,6 +349,7 @@ void parse_primary_packet(uint64_t packet, int w)
       finger_states[0].y.reset();
       finger_states[1].x.reset();
       finger_states[1].y.reset();
+      // tap_as_click_reset();
     }
   }
 
@@ -337,63 +370,120 @@ void parse_primary_packet(uint64_t packet, int w)
     delta_y = 0;
   }
 
+  // Serial.printf("=== tick: %d, Fingers: %d, X: %d, Y: %d, Z: %d, Width: %d, Button: %d, DeltaX: %d, DeltaY: %d, Per_Finger: %d ===\n", global_tick, new_finger_count, x, y, z, width, button, delta_x, delta_y, finger_count);
+
+  // 轻触作为点击，包括单击、双击和三击
+  if (finger_count == 0 && new_finger_count > 0)
+  {
+    tap_start_tick = global_tick;
+    tap_as_click_reset(1);
+    button_state = new_finger_count;
+    tap_detected = true;
+    tap_button = button_state;
+  }
+  else if (finger_count >= 0 && new_finger_count == 0)
+  {
+    if (tap_detected)
+    {
+      // Serial.printf("Tap detected: %d, total_movement: %f, max_tap_z: %d\n", global_tick - tap_start_tick, total_movement, max_tap_z);
+      if (global_tick - tap_start_tick <= tap_time_threshold)
+      {
+
+        if (total_movement < tap_tracking_threshold && max_tap_z < tap_z_threshold)
+        {
+          queue_report(tap_button, 0, 0, 0);
+          button_state = 0;
+          tap_button = 0;
+          tap_as_click_reset(2);
+        }
+      }
+      else
+      {
+        Serial.println("Tap timeout");
+        tap_as_click_reset(3);
+      }
+    }
+  }
+
   finger_count = new_finger_count;
 
   /* State machine logic */
-  if (finger_count == 0)
+  if (finger_count == 0 && new_finger_count == 0)
   {
-    // idle
-    if (button_state == 0 && button)
-    {
-      button_state = new_finger_count < 2 ? LEFT_BUTTON : RIGHT_BUTTON;
-      queue_report(button_state, 0, 0, 0);
-    }
-    else if (button_state != 0 && !button)
-    {
-      button_state = 0;
-      queue_report(0, 0, 0, 0);
-    }
+    // // idle
+    // if (button_state == 0 && !click_is_send)
+    // {
+    //   button_state = new_finger_count < 2 ? LEFT_BUTTON : RIGHT_BUTTON;
+    //   queue_report(button_state, 0, 0, 0);
+    // }
+    // else if (button_state != 0 && !button)
+    // {
+    //   button_state = 0;
+    //   queue_report(0, 0, 0, 0);
+    // }
   }
-  else if (finger_count >= 2 && button_state == 0)
+  else if (finger_count >= 2)
   {
     // scrolling
-    if (button)
-    {
-      // It's OK to change between left and right while scrolling.
-      button_state = new_finger_count > 1 ? RIGHT_BUTTON : LEFT_BUTTON;
-    }
-    else
-    {
-      button_state = 0;
-    }
+    // if (button)
+    // {
+    //   // It's OK to change between left and right while scrolling.
+    //   button_state = new_finger_count > 1 ? RIGHT_BUTTON : LEFT_BUTTON;
+    // }
+    // else
+    // {
+    //   button_state = 0;
+    // }
 
     // Since we're scrolling, we are here every other frame. So we should double
     // the noise threshold.
+    total_movement += abs(delta_x) + abs(delta_y);
+    if (z > max_tap_z)
+    {
+      max_tap_z = z;
+    }
     float scroll_amount =
         to_hid_value(delta_y, noise_threshold_scrolling_y, scale_scroll);
     if (abs(delta_y) <= slow_scroll_threshold)
     {
       scroll_amount = sign(scroll_amount) * slow_scroll_amount;
     }
-    queue_report(button_state, 0, 0, scroll_amount);
+    if (tap_button < 2)
+    {
+      tap_button = 2;
+    }
+    if (scroll_amount != 0)
+    {
+      button_state = 0;
+      // Serial.printf("Scroll amount: %f\n", scroll_amount);
+      queue_report(button_state, 0, 0, scroll_amount);
+    }
   }
-  else if (finger_count == 1 || finger_count >= 2 && button_state != 0)
+  else if (finger_count == 1)
   {
     // 1-finger tracking or 2-finger tracking
-    if (button || (abs(delta_x) < noise_threshold_tracking_x &&
-                   abs(delta_y) < noise_threshold_tracking_y))
+    if (button || (abs(delta_x) < noise_threshold_tracking_x && abs(delta_y) < noise_threshold_tracking_y))
     {
       // If the button is already pressed, we don't change between left and
       // right while dragging.
-      if (button_state == 0)
+      // if (button_state == 0)
+      // {
+      //   button_state = new_finger_count > 1 ? RIGHT_BUTTON : LEFT_BUTTON;
+      // }
+      total_movement += abs(delta_x) + abs(delta_y);
+      if (z > max_tap_z)
       {
-        button_state = new_finger_count > 1 ? RIGHT_BUTTON : LEFT_BUTTON;
+        max_tap_z = z;
       }
     }
     else
     {
       button_state = 0;
     }
+    // else
+    // {
+    //   button_state = 0;
+    // }
     // If there are multiple fingers pressed, normal packets and secondary
     // packets are alternated. So we should double the threshold.
     float threshold_multiplier = finger_count == 1 ? 1.0 : 2.0;
@@ -430,7 +520,14 @@ void parse_primary_packet(uint64_t packet, int w)
     int8_t delta_y_hid = -to_hid_value(
         delta_y, noise_threshold_tracking_y * threshold_multiplier,
         scale_tracking_y * scale_multiplier);
-    queue_report(button_state, delta_x_hid, delta_y_hid, 0);
+    if (abs(delta_x_hid) > 0 || abs(delta_y_hid) > 0)
+    {
+      // Serial.printf("DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
+      button_state = 0;
+      queue_report(button_state, delta_x_hid, delta_y_hid, 0);
+      if (abs(delta_x_hid) > 1 || abs(delta_y_hid) > 1)
+        tap_as_click_reset(4);
+    }
   }
 }
 
@@ -490,6 +587,7 @@ void parse_extended_packet(uint64_t packet)
       {
         scroll_amount = sign(scroll_amount) * slow_scroll_amount;
       }
+      // Serial.printf("Wmode Scroll amount: %f\n", scroll_amount);
       queue_report(button_state, 0, 0, scroll_amount);
     }
     else
@@ -498,7 +596,9 @@ void parse_extended_packet(uint64_t packet)
           delta_x, noise_threshold_tracking_x * 2.0F, scale_tracking_x);
       int8_t delta_y_hid = -to_hid_value(
           delta_y, noise_threshold_tracking_y * 2.0F, scale_tracking_y);
-      queue_report(button_state, delta_x_hid, delta_y_hid, 0);
+      Serial.printf("Wmode DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
+      // queue_report(button_state, delta_x_hid, delta_y_hid, 0);
+      queue_report(0, delta_x_hid, delta_y_hid, 0);
     }
   }
 }
@@ -513,25 +613,15 @@ void touchpadTask(void *pvParameters)
     vTaskDelete(NULL);
     return;
   }
+
   while (1)
   {
-    if (xQueueReceive(mouseEventQueue, &packet, pdMS_TO_TICKS(10)))
-    {
-      // 处理packet数据
-      uint8_t w = (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
-      switch (w)
-      {
-      case 3:
-        break;
-      case 2:
-        parse_extended_packet(packet);
-        break;
-      default:
-        parse_primary_packet(packet, w);
-        break;
-      }
-    }
-    // 其他任务逻辑...
+    // 在解析数据包时，我们将报告排队，而不是直接发送它们。
+    // 然后，我们延迟几帧后再发送报告，以便我们有机会回溯性地修改报告。
+    // 我们每帧最多只生成一个报告。因此，我们每帧只需要发送一个待发送的报告。
+    // 一旦所有活动停止，触控板会继续发送包含 x、y 和 z 都设置为 0 的数据包，持续一秒钟。
+    // 我们只报告第一个数据包。这意味着我们有足够的时间清空报告队列，这是我们需要做的。
+    // 否则，队列很快就会堵塞，报告会泄漏到下一次会话中，导致奇怪的行为。
     global_tick++;
     if (global_tick - session_started_tick >= frames_delay)
     {
@@ -553,7 +643,7 @@ void touchpadTask(void *pvParameters)
           {
             if (item.buttons == 1)
             {
-              // bleMouse.click(MOUSE_LEFT);
+              bleMouse.click(MOUSE_LEFT);
             }
             else if (item.buttons == 2)
             {
@@ -576,40 +666,25 @@ void touchpadTask(void *pvParameters)
       }
     }
 
-    vTaskDelay(xDelay);
+    if (xQueueReceive(mouseEventQueue, &packet, pdMS_TO_TICKS(10)))
+    {
+      // 处理packet数据
+      uint8_t w = (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
+      switch (w) // 文档 3.2.6 节，Figure 3-9
+      {
+      case 3: // 当w=3时，表示是Pass-Through encapsulation packet（直通式封装数据包）
+        break;
+      case 2: // 当w=2时，表示是Extended W mode packet（扩展W模式数据包）
+        parse_extended_packet(packet);
+        break;
+      default: // 当w=0或w=1时，表示是capMultiFinger，0是两根手指，1是三根及以上手指
+        parse_primary_packet(packet, w);
+        break;
+      }
+    }
+
+    // vTaskDelay(xDelay);
   }
-
-  // const TickType_t xDelay = pdMS_TO_TICKS(10);
-
-  // while (1)
-  // {
-  //   global_tick++;
-  //   esp_task_wdt_reset(); // 喂狗
-
-  //   report previousItem = {0, 0, 0, 0};
-
-  //   if (g_packet_ready)
-  //   {
-  //     uint64_t packet = g_received_packet;
-  //     g_packet_ready = false;
-  //     uint8_t w =
-  //         (packet >> 26) & 0x01 | (packet >> 1) & 0x2 | (packet >> 2) & 0x0C;
-
-  //     // process_packet(packet);
-  //     switch (w)
-  //     {
-  //     case 3: // pass through
-  //       break;
-  //     case 2: // extended w mode
-  //       parse_extended_packet(packet);
-  //       break;
-  //     default:
-  //       parse_primary_packet(packet, w);
-  //       break;
-  //     }
-  //   }
-
-  // }
 }
 
 void setup()
