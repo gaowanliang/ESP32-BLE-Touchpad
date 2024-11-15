@@ -8,6 +8,28 @@
 #include <BleMouse.h>
 #include <freertos/queue.h>
 
+// 在文件顶部定义或注释掉 DEBUG 宏
+// #define DEBUG
+#define INFO
+
+// 定义调试输出宏
+#ifdef DEBUG
+#define debug_printf(fmt, ...) Serial.printf((fmt), ##__VA_ARGS__)
+#define debug_println(x) Serial.println(x)
+#define info_printf(fmt, ...) Serial.printf((fmt), ##__VA_ARGS__)
+#define info_println(x) Serial.println(x)
+#elif defined(INFO)
+#define debug_printf(fmt, ...)
+#define debug_println(x)
+#define info_printf(fmt, ...) Serial.printf((fmt), ##__VA_ARGS__)
+#define info_println(x) Serial.println(x)
+#else
+#define debug_printf(fmt, ...)
+#define debug_println(x)
+#define info_printf(fmt, ...)
+#define info_println(x)
+#endif
+
 BleMouse bleMouse;
 
 #ifndef min
@@ -53,14 +75,21 @@ unsigned long finger_down_time = 0;
 // Tap as click 轻触作为点击
 bool tap_detected = false;
 unsigned long tap_start_tick = 0;
-const unsigned long tap_time_threshold = 25; // 轻触时间tick
+const unsigned long tap_time_threshold = 35; // 轻触时间tick
 float total_movement = 0;
-const float tap_tracking_threshold = 15;   // 防止手抖
-const short tap_z_threshold = 100;         // 防止手掌误触，z是触摸宽度，当手掌压上去时，z值会很大
-short max_tap_z = 0;                       // 记录最大的z值
-uint16_t button_state_count = 0;           // 记录超过一定次数的按钮状态
-const uint16_t button_state_threshold = 5; // 按钮状态超过一定次数，才认为是点击
-short tap_button = 0;                      // 记录轻触时的按钮状态
+const float tap_tracking_threshold = 15;          // 防止手抖
+const short tap_z_threshold = 100;                // 防止手掌误触，z是触摸宽度，当手掌压上去时，z值会很大
+short max_tap_z = 0;                              // 记录最大的z值
+uint16_t button_state_count = 0;                  // 记录超过一定次数的按钮状态
+const uint16_t button_state_threshold = 5;        // 按钮状态超过一定次数，才认为是点击
+short tap_button = 0;                             // 记录轻触时的按钮状态
+const short tap_and_pan_as_drag_threshold = 70;   // 轻触后滑动作为拖动的阈值
+bool tap_and_pan_as_drag_detected = false;        // 轻触后滑动作为拖动是否已经检测到
+unsigned long tap_and_pan_as_drag_start_tick = 0; // 轻触后滑动作为拖动开始的tick
+
+// 滚动相关
+bool reverse_LR_scroll = true; // 左右滚动反转
+bool reverse_UD_scroll = true; // 上下滚动反转
 
 // 定义消息队列句柄
 static QueueHandle_t mouseEventQueue = NULL;
@@ -87,6 +116,7 @@ struct report
   int8_t x;
   int8_t y;
   int8_t scroll;
+  bool LR_scroll;
 };
 
 RingBuffer<report, 32> reports;
@@ -95,9 +125,9 @@ static short finger_count = 0;
 static uint8_t button_state = 0;
 // 变量
 float scale_tracking_x, scale_tracking_y;
-float scale_scroll;
+float scale_scroll_x, scale_scroll_y;
 float noise_threshold_tracking_x, noise_threshold_tracking_y;
-float noise_threshold_scrolling_y;
+float noise_threshold_scrolling_x, noise_threshold_scrolling_y;
 float max_delta_x, max_delta_y;
 float slow_scroll_threshold;
 float proximity_threshold_x, proximity_threshold_y;
@@ -165,19 +195,29 @@ void tap_as_click_reset(int flag)
   total_movement = 0;
   max_tap_z = 0;
   button_state_count = 0;
-  Serial.printf("Tap as click reset, flag: %d\n", flag);
+  tap_button = 0;
+  debug_printf("Tap as click reset, flag: %d\n", flag);
 }
 
-void queue_report(uint8_t buttons, int8_t x, int8_t y, float scroll)
+void queue_report(uint8_t buttons, int8_t x, int8_t y, float scroll, bool LR_scroll = false)
 {
   static float scroll_amount_rollover = 0;
   report item = {.buttons = buttons};
   if (button_released_tick != 0 &&
       global_tick - button_released_tick < frames_stablization)
   {
-    item.x = 0;
-    item.y = 0;
-    item.scroll = 0;
+    if (!tap_and_pan_as_drag_detected)
+    {
+      item.x = 0;
+      item.y = 0;
+      item.scroll = 0;
+    }
+    else
+    {
+      item.x = x;
+      item.y = y;
+      item.scroll = 0;
+    }
   }
   else
   {
@@ -202,6 +242,7 @@ void queue_report(uint8_t buttons, int8_t x, int8_t y, float scroll)
     item.x = x;
     item.y = y;
     item.scroll = scroll;
+    item.LR_scroll = LR_scroll;
   }
   reports.push_back(item);
 }
@@ -353,24 +394,24 @@ void parse_primary_packet(uint64_t packet, int w)
     }
   }
 
-  if (finger_count == 1 && new_finger_count == 1 &&
-      (abs(delta_x) >= max_delta_x || abs(delta_y) >= max_delta_y))
-  {
-    // In rare occasions where a finger is released and another is pressed in
-    // the same frame, we don't see a finger count change but a big jump in
-    // finger position. In this case, reset the position and start over.
-    // This solution isn't ideal. A rather big jump could happen when the
-    // fingers are moving very fast. A more reliable approach would be based
-    // on the recent velocity of the finger movements. But it's complicated
-    // and expensive. Both scenarios just described are edge cases and the user
-    // is probably just fooling around.
-    finger_states[0].x.reset();
-    finger_states[0].y.reset();
-    delta_x = 0;
-    delta_y = 0;
-  }
-
-  // Serial.printf("=== tick: %d, Fingers: %d, X: %d, Y: %d, Z: %d, Width: %d, Button: %d, DeltaX: %d, DeltaY: %d, Per_Finger: %d ===\n", global_tick, new_finger_count, x, y, z, width, button, delta_x, delta_y, finger_count);
+  // if (finger_count == 1 && new_finger_count == 1 &&
+  //     (abs(delta_x) >= max_delta_x || abs(delta_y) >= max_delta_y))
+  // {
+  //   // In rare occasions where a finger is released and another is pressed in
+  //   // the same frame, we don't see a finger count change but a big jump in
+  //   // finger position. In this case, reset the position and start over.
+  //   // This solution isn't ideal. A rather big jump could happen when the
+  //   // fingers are moving very fast. A more reliable approach would be based
+  //   // on the recent velocity of the finger movements. But it's complicated
+  //   // and expensive. Both scenarios just described are edge cases and the user
+  //   // is probably just fooling around.
+  //   finger_states[0].x.reset();
+  //   finger_states[0].y.reset();
+  //   delta_x = 0;
+  //   delta_y = 0;
+  // }
+  // "=== tick: %d, Fingers: %d, X: %d, Y: %d, Z: %d, Width: %d, Button: %d, DeltaX: %d, DeltaY: %d, Per_Finger: %d ===\n"
+  debug_printf("=== t: %d, F: %d, X: %d, Y: %d, Z: %d, W: %d, B: %d, DX: %d, DY: %d, PF: %d ===\n", global_tick, new_finger_count, x, y, z, width, button, delta_x, delta_y, finger_count);
 
   // 轻触作为点击，包括单击、双击和三击
   if (finger_count == 0 && new_finger_count > 0)
@@ -385,13 +426,20 @@ void parse_primary_packet(uint64_t packet, int w)
   {
     if (tap_detected)
     {
-      // Serial.printf("Tap detected: %d, total_movement: %f, max_tap_z: %d\n", global_tick - tap_start_tick, total_movement, max_tap_z);
+      debug_printf("Tap detected: %d, total_movement: %f, max_tap_z: %d\n", global_tick - tap_start_tick, total_movement, max_tap_z);
       if (global_tick - tap_start_tick <= tap_time_threshold)
       {
 
         if (total_movement < tap_tracking_threshold && max_tap_z < tap_z_threshold)
         {
           queue_report(tap_button, 0, 0, 0);
+
+          if (tap_button == 1)
+          {
+            debug_println("*** Drag detected ***");
+            tap_and_pan_as_drag_start_tick = global_tick;
+          }
+
           button_state = 0;
           tap_button = 0;
           tap_as_click_reset(2);
@@ -399,7 +447,7 @@ void parse_primary_packet(uint64_t packet, int w)
       }
       else
       {
-        Serial.println("Tap timeout");
+        debug_printf("Tap timeout");
         tap_as_click_reset(3);
       }
     }
@@ -416,13 +464,17 @@ void parse_primary_packet(uint64_t packet, int w)
     //   button_state = new_finger_count < 2 ? LEFT_BUTTON : RIGHT_BUTTON;
     //   queue_report(button_state, 0, 0, 0);
     // }
-    // else if (button_state != 0 && !button)
-    // {
-    //   button_state = 0;
-    //   queue_report(0, 0, 0, 0);
-    // }
+    if (button_state != 0 && !button)
+    {
+      button_state = 0;
+      queue_report(0, 0, 0, 0);
+    }
   }
-  else if (finger_count >= 2)
+  else if (finger_count >= 3)
+  {
+    tap_button = finger_count;
+  }
+  else if (finger_count == 2)
   {
     // scrolling
     // if (button)
@@ -442,9 +494,18 @@ void parse_primary_packet(uint64_t packet, int w)
     {
       max_tap_z = z;
     }
-    float scroll_amount =
-        to_hid_value(delta_y, noise_threshold_scrolling_y, scale_scroll);
-    if (abs(delta_y) <= slow_scroll_threshold)
+    bool LR_scroll = abs(delta_x) > abs(delta_y);
+    float scroll_amount = 0;
+    if (LR_scroll)
+    {
+      scroll_amount = to_hid_value(delta_x, noise_threshold_scrolling_x, scale_scroll_x);
+    }
+    else
+    {
+      scroll_amount = to_hid_value(delta_y, noise_threshold_scrolling_y, scale_scroll_y);
+    }
+
+    if (abs(LR_scroll ? delta_x : delta_y) <= slow_scroll_threshold)
     {
       scroll_amount = sign(scroll_amount) * slow_scroll_amount;
     }
@@ -455,8 +516,9 @@ void parse_primary_packet(uint64_t packet, int w)
     if (scroll_amount != 0)
     {
       button_state = 0;
+      debug_printf("Scroll amount: %f\n", scroll_amount);
       // Serial.printf("Scroll amount: %f\n", scroll_amount);
-      queue_report(button_state, 0, 0, scroll_amount);
+      queue_report(button_state, 0, 0, scroll_amount, LR_scroll);
     }
   }
   else if (finger_count == 1)
@@ -522,8 +584,17 @@ void parse_primary_packet(uint64_t packet, int w)
         scale_tracking_y * scale_multiplier);
     if (abs(delta_x_hid) > 0 || abs(delta_y_hid) > 0)
     {
-      // Serial.printf("DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
-      button_state = 0;
+      debug_printf("DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
+      if (tap_and_pan_as_drag_detected || global_tick - tap_and_pan_as_drag_start_tick <= tap_and_pan_as_drag_threshold)
+      {
+        tap_and_pan_as_drag_detected = true;
+        button_state = 1;
+        debug_printf("*** Drag Start ***\n");
+      }
+      else
+      {
+        button_state = 0;
+      }
       queue_report(button_state, delta_x_hid, delta_y_hid, 0);
       if (abs(delta_x_hid) > 1 || abs(delta_y_hid) > 1)
         tap_as_click_reset(4);
@@ -581,14 +652,23 @@ void parse_extended_packet(uint64_t packet)
     {
       // Since we are parsing secondary packets, we are here every other frame,
       // so we should double the noise threshold.
-      float scroll_amount =
-          to_hid_value(delta_y, noise_threshold_scrolling_y, scale_scroll);
-      if (abs(delta_y) <= slow_scroll_threshold)
+      bool LR_scroll = abs(delta_x) > abs(delta_y);
+
+      float scroll_amount = 0;
+      if (LR_scroll)
+      {
+        scroll_amount = to_hid_value(delta_x, noise_threshold_scrolling_x, scale_scroll_x);
+      }
+      else
+      {
+        scroll_amount = to_hid_value(delta_y, noise_threshold_scrolling_y, scale_scroll_y);
+      }
+      if (abs(LR_scroll ? delta_x : delta_y) <= slow_scroll_threshold)
       {
         scroll_amount = sign(scroll_amount) * slow_scroll_amount;
       }
-      // Serial.printf("Wmode Scroll amount: %f\n", scroll_amount);
-      queue_report(button_state, 0, 0, scroll_amount);
+      debug_printf("Wmode Scroll amount: %f\n", scroll_amount);
+      queue_report(button_state, 0, 0, scroll_amount, LR_scroll);
     }
     else
     {
@@ -596,7 +676,7 @@ void parse_extended_packet(uint64_t packet)
           delta_x, noise_threshold_tracking_x * 2.0F, scale_tracking_x);
       int8_t delta_y_hid = -to_hid_value(
           delta_y, noise_threshold_tracking_y * 2.0F, scale_tracking_y);
-      Serial.printf("Wmode DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
+      debug_printf("Wmode DeltaX: %d, DeltaY: %d\n", delta_x_hid, delta_y_hid);
       // queue_report(button_state, delta_x_hid, delta_y_hid, 0);
       queue_report(0, delta_x_hid, delta_y_hid, 0);
     }
@@ -606,6 +686,7 @@ void parse_extended_packet(uint64_t packet)
 void touchpadTask(void *pvParameters)
 {
   uint64_t packet;
+  int8_t scroll = 0;
 
   if (mouseEventQueue == NULL)
   {
@@ -629,7 +710,7 @@ void touchpadTask(void *pvParameters)
       {
         report item = reports.pop_front();
         // hid::report(item.buttons, item.x, item.y, item.scroll);
-        Serial.printf("Buttons: %d, X: %d, Y: %d, Scroll: %d\n", item.buttons, item.x, item.y, item.scroll);
+        info_printf("Buttons: %d, X: %d, Y: %d, Scroll: %d, LR_Scroll: %d\n", item.buttons, item.x, item.y, item.scroll, item.LR_scroll);
 
         // 如果和上次的一样，就不传了
         // if (item.buttons == previousItem.buttons && item.x == previousItem.x && item.y == previousItem.y && item.scroll == previousItem.scroll)
@@ -643,22 +724,70 @@ void touchpadTask(void *pvParameters)
           {
             if (item.buttons == 1)
             {
-              bleMouse.click(MOUSE_LEFT);
+              if (item.x != 0 || item.y != 0)
+              {
+                if (tap_and_pan_as_drag_detected)
+                {
+                  debug_println("*** Drag press ***");
+                  bleMouse.press(MOUSE_LEFT);
+                }
+                bleMouse.move(item.x, item.y);
+              }
+              else
+              {
+                bleMouse.click(MOUSE_LEFT);
+              }
             }
             else if (item.buttons == 2)
             {
               bleMouse.click(MOUSE_RIGHT);
             }
+            else if (item.buttons == 3)
+            {
+              bleMouse.click(MOUSE_MIDDLE);
+            }
+            else if (item.buttons == 4)
+            {
+              bleMouse.click(MOUSE_BACK);
+            }
+            else if (item.buttons == 5)
+            {
+              bleMouse.click(MOUSE_FORWARD);
+            }
           }
           else
           {
+
             if (item.scroll != 0)
             {
-              bleMouse.move(0, 0, item.scroll);
+              if ((reverse_UD_scroll && !item.LR_scroll) || (reverse_LR_scroll && item.LR_scroll))
+                scroll = -item.scroll;
+              else
+                scroll = item.scroll;
+              if (item.LR_scroll)
+              {
+                debug_printf("LR Scroll: %d\n", scroll);
+                bleMouse.move(0, 0, 0, scroll);
+              }
+              else
+              {
+                bleMouse.move(0, 0, scroll);
+              }
             }
             else if (item.x != 0 || item.y != 0)
             {
+
               bleMouse.move(item.x, item.y);
+            }
+            else
+            {
+              if (tap_and_pan_as_drag_detected)
+              {
+                tap_and_pan_as_drag_detected = false;
+                tap_and_pan_as_drag_start_tick = 0;
+                bleMouse.release(MOUSE_LEFT);
+                debug_println("*** Drag released ***");
+              }
             }
           }
         }
@@ -711,11 +840,14 @@ void setup()
   // 初始化变量
   scale_tracking_x = scale_tracking_mm / synaptics::units_per_mm_x;
   scale_tracking_y = scale_tracking_mm / synaptics::units_per_mm_y;
-  scale_scroll = scale_scroll_mm / synaptics::units_per_mm_y;
+  scale_scroll_x = scale_scroll_mm / synaptics::units_per_mm_x;
+  scale_scroll_y = scale_scroll_mm / synaptics::units_per_mm_y;
   noise_threshold_tracking_x =
       noise_threshold_tracking_mm * synaptics::units_per_mm_x;
   noise_threshold_tracking_y =
       noise_threshold_tracking_mm * synaptics::units_per_mm_y;
+  noise_threshold_scrolling_x =
+      noise_threshold_scrolling_mm * synaptics::units_per_mm_x;
   noise_threshold_scrolling_y =
       noise_threshold_scrolling_mm * synaptics::units_per_mm_y;
   max_delta_x = max_delta_mm * synaptics::units_per_mm_x;
