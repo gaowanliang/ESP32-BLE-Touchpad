@@ -1,43 +1,55 @@
+[简体中文](README.zh-CN.md) | English
+
 # ESP32-BLE-Touchpad
 
-一个基于 ESP32 的蓝牙触摸板项目，驱动一个 Synaptics 控制器的触摸板，通过蓝牙连接到电脑或者手机，实现鼠标功能。
+An ESP32-based Bluetooth touchpad project that drives a Synaptics controller touchpad to connect to a computer or mobile phone via Bluetooth, providing mouse functionality.
 
-## 起因
+## Motivation
 
-我从淘宝上买了个旧的联想 S41 笔记本上的拆机触摸板 TM2334，带邮费只要 16 块钱。我想做一个蓝牙触摸板，可以连接到手机或者电脑上使用。这个触摸板属于点击板（clickpad），不是传统的按键式触摸板，所以我需要一个模块来模拟鼠标左键和右键。我手里正好有之前从舍友那里拿到（白嫖）的 ESP32 开发板，所以我决定用 ESP32 来实现这个功能。
+I bought an old Synaptics TM2334 touchpad from a Lenovo S41 laptop on Taobao for only 16 yuan including shipping. I wanted to make a Bluetooth touchpad that could connect to a phone or computer. This touchpad is a clickpad, not a traditional button-style touchpad, so I needed a module to simulate mouse left and right buttons. I happened to have an ESP32 development board that I got from a roommate (for free), so I decided to use the ESP32 to implement this functionality.
 
-目前的大多数笔记本触控板由Synaptics制造，通常使用PS/2接口。默认情况下（即在没有任何特殊驱动程序的情况下），它们通常可以模拟常规的PS/2鼠标，即可以报告手指移动和按钮点击，但仅此而已。要实现我们通常在笔记本电脑上用到的多指手势，我们需要自己实现。
+Most of today's laptop touchpads are made by Synaptics and usually use the PS/2 interface. By default (i.e., without any special drivers), they typically can mimic a regular PS/2 mouse, that is, they can report finger movements and button clicks, but that's it. To implement the multi-finger gestures we commonly use on laptops, we need to implement them ourselves.
 
-## 功能清单
+## Feature List
 
-> [!NOTE]
-> 由于我日常使用的是 Windows 系统，所以我只实现了 Windows 系统下的鼠标功能，其他系统暂未测试。
+> **Note**
+> Since I use Windows systems daily, I have only implemented mouse functions under Windows. Other systems have not been tested yet.
 
-- [x] 鼠标移动
-- [ ] 按动左下角的区域作为鼠标左键，按动右下角的区域作为鼠标右键（封壳之后再实现，目前按起来比较困难）
-- [x] 轻触作为点击
-  - [x] 单指轻触作为鼠标左键
-  - [x] 两指轻触作为鼠标右键
-  - [x] 三指轻触作为鼠标中键
-  - [x] 屏蔽手掌误触
-- [x] 滚动
-  - [x] 两指上下滑动来作为垂直方向的滚动
-  - [x] 两指左右滑动来作为水平方向的滚动
-- [ ] 三指手势
-  - [ ] 三指左右移动来切换应用
-  - [ ] 三指上下移动来显示桌面或回到应用
-- [x] 轻触一下，然后移动手指来实现拖拽
-- [ ] 放大和缩小
-- [ ] 休眠模式
+- [x] Mouse movement
+- [ ] Pressing the lower left area as the mouse left button, pressing the lower right area as the mouse right button (to be implemented after casing, currently it's difficult to press)
+- [x] Tap to click
+  - [x] Single-finger tap as mouse left click
+  - [x] Two-finger tap as mouse right click
+  - [x] Three-finger tap as mouse middle click
+  - [x] Palm rejection
+- [x] Scrolling
+  - [x] Two-finger vertical swipe for vertical scrolling
+  - [x] Two-finger horizontal swipe for horizontal scrolling
+- [ ] Three-finger gestures
+  - [ ] Three-finger swipe left/right to switch applications (implemented by sending Alt + Tab)
+  - [ ] Three-finger swipe up/down to show desktop or return to application (implemented by sending Win + Tab and Win + D)
+- [x] Tap and drag to enable dragging
+- [ ] Zoom in and out
+- [ ] Sleep mode
 
-## 贡献
+## Compilation
 
-欢迎提交问题和拉取请求来改进项目。
+This program is compiled using PlatformIO. You can compile it by installing the PlatformIO plugin in VSCode. The project has already configured the
 
-## 感谢
+platformio.ini
 
-[@delingren 的 synaptics_touchpad 项目](https://github.com/delingren/synaptics_touchpad)
+file. You just need to open the project folder and click the PlatformIO `Build` button to compile.
 
-## 许可证
+## Contribution
 
-该项目基于 MIT 许可证，详细信息请参阅[LICENSE](LICENSE)文件。
+You're welcome to submit issues and pull requests to improve the project.
+
+## Acknowledgments
+
+[@delingren's synaptics_touchpad project](https://github.com/delingren/synaptics_touchpad)
+
+[@T-vK's ESP32-BLE-Mouse project](https://github.com/T-vK/ESP32-BLE-Mouse)
+
+## License
+
+This project is based on the MIT license. For details, please refer to the [LICENSE](LICENSE) file.
