@@ -6,7 +6,7 @@ An ESP32-based Bluetooth touchpad project that drives a Synaptics controller tou
 
 ## Motivation
 
-I bought an old Synaptics TM2334 touchpad from a Lenovo S41 laptop on Taobao for only 16 yuan including shipping. I wanted to make a Bluetooth touchpad that could connect to a phone or computer. This touchpad is a clickpad, not a traditional button-style touchpad, so I needed a module to simulate mouse left and right buttons. I happened to have an ESP32 development board that I got from a roommate (for free), so I decided to use the ESP32 to implement this functionality.
+I bought an old Synaptics TM2334 touchpad from a Lenovo S41 laptop on Taobao (AliExpress) for only CNY 16 (in China, approx. USD 2.5) including shipping. I wanted to make a Bluetooth touchpad that could connect to a phone or computer. This touchpad is a clickpad, not a traditional button-style touchpad, so I needed a module to simulate mouse left and right buttons. I happened to have an ESP32 development board that I got from a roommate (for free), so I decided to use the ESP32 to implement this functionality.
 
 Most of today's laptop touchpads are made by Synaptics and usually use the PS/2 interface. By default (i.e., without any special drivers), they typically can mimic a regular PS/2 mouse, that is, they can report finger movements and button clicks, but that's it. To implement the multi-finger gestures we commonly use on laptops, we need to implement them ourselves.
 
