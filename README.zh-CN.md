@@ -36,6 +36,13 @@
 
 该程序通过 PlatformIO 编译，你可以通过 VSCode 安装 PlatformIO 插件来编译。项目已经配置好了 `platformio.ini` 文件，你只需要打开项目文件夹，然后点击 PlatformIO 的 `Build` 按钮即可编译。
 
+你需要修改 `src/main.cpp` 文件中的 第 48 行 和 第 49 行，将 `CLOCK_PIN` 和 `DATA_PIN` 改为你的实际引脚。
+
+```cpp
+const int CLOCK_PIN = 23;
+const int DATA_PIN = 5;
+```
+
 ## 贡献
 
 欢迎提交问题和拉取请求来改进项目。

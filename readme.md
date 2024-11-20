@@ -12,7 +12,7 @@ Most of today's laptop touchpads are made by Synaptics and usually use the PS/2 
 
 ## Feature List
 
-> **Note**
+> [!Note]
 > Since I use Windows systems daily, I have only implemented mouse functions under Windows. Other systems have not been tested yet.
 
 - [x] Mouse movement
@@ -34,11 +34,14 @@ Most of today's laptop touchpads are made by Synaptics and usually use the PS/2 
 
 ## Compilation
 
-This program is compiled using PlatformIO. You can compile it by installing the PlatformIO plugin in VSCode. The project has already configured the
+This program is compiled using PlatformIO. You can compile it by installing the PlatformIO plugin in VSCode. The project has already configured the `platformio.ini` file. You just need to open the project folder and click the PlatformIO `Build` button to compile.
 
-platformio.ini
+You need to modify the 48th and 49th lines in the `src/main.cpp` file, change `CLOCK_PIN` and `DATA_PIN` to your actual pins.
 
-file. You just need to open the project folder and click the PlatformIO `Build` button to compile.
+```cpp
+const int CLOCK_PIN = 23;
+const int DATA_PIN = 5;
+```
 
 ## Contribution
 

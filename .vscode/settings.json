@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "*.cpp1": "cpp",
-        "*.cpp0": "cpp"
+        "*.cpp0": "cpp",
+        "random": "cpp",
+        "limits": "cpp"
     }
 }
